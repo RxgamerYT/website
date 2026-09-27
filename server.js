@@ -9,6 +9,7 @@ const PORT = 3000;
 const USERS_FILE = path.join(__dirname, 'users.json');
 const CHATS_FILE = path.join(__dirname, 'chats.json');
 const PROFILE_DIR = path.join(__dirname, 'public', 'profilepictures');
+const ATTACHMENTS_DIR = path.join(__dirname, 'public', 'attachments');
 
 const ENCRYPTION_KEY = crypto.scryptSync('my-super-secret-key-change-this', 'salt', 32);
 const IV_LENGTH = 16;
@@ -195,6 +196,7 @@ app.post('/api/delete-account', (req, res) => {
 });
 
 app.post('/api/theme', (req, res) => {
+  let fileData = req.body;
   const { username, isLightMode } = req.body;
   const users = readJSON(USERS_FILE, {});
   if (users[username]) {
@@ -290,9 +292,71 @@ app.get('/api/chats/:username', (req, res) => {
 
 app.post('/api/chats/:username', (req, res) => {
   const chats = readJSON(CHATS_FILE, {});
-  chats[req.params.username] = req.body.chats;
+  const userChats = req.body.chats;
+
+  if (!fs.existsSync(ATTACHMENTS_DIR)) {
+    fs.mkdirSync(ATTACHMENTS_DIR, { recursive: true });
+  }
+
+  // Handle file uploads and prevent name collisions by giving unique numbers/ids
+  if (Array.isArray(userChats)) {
+    userChats.forEach(chat => {
+      if (Array.isArray(chat.history)) {
+        chat.history.forEach(msg => {
+          if (Array.isArray(msg.files)) {
+            msg.files.forEach(fileObj => {
+              if (fileObj.data && fileObj.data.startsWith('data:')) {
+                const matches = fileObj.data.match(/^data:(.+);base64,(.+)$/);
+                if (matches) {
+                  const ext = path.extname(fileObj.name) || '';
+                  const uniqueId = Date.now() + '_' + Math.floor(Math.random() * 100000);
+                  const savedFilename = `${uniqueId}${ext}`;
+                  const filePath = path.join(ATTACHMENTS_DIR, savedFilename);
+
+                  fs.writeFileSync(filePath, Buffer.from(matches[2], 'base64'));
+
+                  fileObj.url = `/attachments/${savedFilename}`;
+                  delete fileObj.data; // keep chats.json light
+                }
+              }
+            });
+          }
+        });
+      }
+    });
+  }
+
+  chats[req.params.username] = userChats;
   writeJSON(CHATS_FILE, chats);
   res.json({ success: true });
+});
+
+app.post('/api/generate', async (req, res) => {
+  try {
+    const { contents, model = 'gemini-1.5-flash' } = req.body;
+    const apiKey = process.env.GEMINI_API_KEY || 'YOUR_FALLBACK_API_KEY_HERE';
+
+    if (!apiKey || apiKey === 'YOUR_FALLBACK_API_KEY_HERE') {
+      return res.status(400).json({ 
+        error: 'No server api key set up yet fr. put one in server.js' 
+      });
+    }
+
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contents })
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+      return res.status(response.status).json(data);
+    }
+    res.json(data);
+  } catch (err) {
+    console.error('error generating content:', err);
+    res.status(500).json({ error: 'rip something broke on backend' });
+  }
 });
 
 app.listen(PORT, () => {
